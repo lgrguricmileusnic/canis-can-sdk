@@ -1,4 +1,4 @@
-// Copyright 2020-2022 Canis Automotive Labs (https://canislabs.com)
+// Copyright 2020-2024 Canis Automotive Labs (https://canislabs.com)
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 // documentation files (the "Software"), to deal in the Software without restriction, including without limitation
@@ -16,7 +16,7 @@
 
 // TODO add low-power standby mode to API (put controller into standby, put transceiver into standby)
 // TODO add multiple FIFOs feeding in to the priority queue
-// TODO parameterize API to allow multiple CAN controller instances
+// TODO add 'signal' API that will extract specific bit fields from the payload (or ID)
 
 #ifndef CANAPI_H
 #define CANAPI_H
@@ -48,25 +48,26 @@
 #endif
 ///////////////////////////////////////////////////////////////////////////////
 
-// Size of data structures use for the CAN driver
-#ifndef CAN_TX_QUEUE_SIZE
-#define CAN_TX_QUEUE_SIZE               (32U)           // Must be less <= 32
+// TODO make the transmit queue size driver-specific when allowing mixed controller hardware types
+
+#if !defined(CAN_HW_TX_QUEUE_SIZE) 
+#error "Must define CAN_HW_TX_QUEUE_SIZE!"
+#endif
+#if !defined(CAN_TX_FIFO_SIZE) 
+#error "Must define CAN_TX_FIFO_SIZE!"
+#endif
+#if !defined(CAN_RX_FIFO_SIZE)
+#error "Must define CAN_RX_FIFO_SIZE!"
+#endif
+#if !defined(CAN_TX_EVENT_FIFO_SIZE)
+#error "Must define CAN_TX_EVENT_FIFO_SIZE!"
+#endif
+#if !defined(UREF_HASH_TABLE_SIZE)
+#error "Must define the size of the uref hash table"
 #endif
 
-#ifndef CAN_TX_FIFO_SIZE
-#define CAN_TX_FIFO_SIZE                (32U)           // Must be less <= 32
-#endif
-
-#ifndef CAN_RX_FIFO_SIZE
-#define CAN_RX_FIFO_SIZE                (128U)          // Must be less than 256
-#endif
-
-#ifndef CAN_TX_EVENT_FIFO_SIZE
-#define CAN_TX_EVENT_FIFO_SIZE          (128U)          // Must be less than 256
-#endif
-
-#if (CAN_TX_QUEUE_SIZE > 32)
-#error "CAN_TX_QUEUE_SIZE must be <= 32"
+#if (CAN_HW_TX_QUEUE_SIZE > 32)
+#error "CAN_HW_TX_QUEUE_SIZE must be <= 32"
 #endif
 
 #if (CAN_TX_FIFO_SIZE > 32)
@@ -108,6 +109,7 @@ typedef enum {
     CAN_ERC_NO_ROOM_FIFO,                               // No room in the transmit FIFO queue
     CAN_ERC_BAD_WRITE,                                  // Write to a controller register failed
     CAN_ERC_NO_INTERFACE,                               // No interface binding set for the controller
+    CAN_ERC_NO_PAYLOAD,                                 // Frame to send has no payload
 } can_errorcode_t;
 
 /// @brief CAN error frame details
@@ -198,29 +200,37 @@ typedef enum {
     CAN_BITRATE_250K_875,       // 250kbit/sec 87.5% sample point (J1939, CANOpen) 
     CAN_BITRATE_125K_875,       // 125kbit/sec 87.5% sample point
     CAN_BITRATE_1M_875,         // 1Mbit/sec 85.5% sample point
+    // TODO add more profiles for CAN FD
+    CAN_BITRATE_FD_500K_2M,     // 500Kbit/sec nominal, 2Mbit/sec FD rate, 87.5% CAN sample point, 75% FD sample point
     CAN_BITRATE_CUSTOM,         // A custom profile (other parameters must be defined)
 } can_profile_t;
 
 /// @brief Structure holding the profile and other parameters
 typedef struct {
     can_profile_t profile;
-    uint8_t brp;                // Baud rate prescaler (0 = /1)
-    uint8_t tseg1;              // CAN TSEG1 - 1
-    uint8_t tseg2;              // CAN TSGE2 - 1
-    uint8_t sjw;                // CAN SJW - 1
+    uint8_t nbrp;               // Baud rate prescaler (0 = /1)
+    uint8_t ntseg1;             // CAN TSEG1 - 1
+    uint8_t ntseg2;             // CAN TSGE2 - 1
+    uint8_t nsjw;               // CAN SJW - 1
+    uint8_t dbrp;               // Baud rate prescaler (0 = /1) Set to NBRP to keep time quanta same across a baud-rate change
+    uint8_t dtseg1;             // FD TSEG1 - 1
+    uint8_t dtseg2;             // FD TSEG2 - 1
+    uint8_t dsjw;               // FD SJW - 1
+    uint8_t tcdo;               // FD offset from automatic transmitter delay compensation
 } can_bitrate_t;
 
 /// @brief Event types
 typedef enum {
     CAN_EVENT_TYPE_TRANSMITTED_FRAME = 0,   // Frame transmitted
-    CAN_EVENT_TYPE_RECEIVED_FRAME,          // Frame received
-    CAN_EVENT_TYPE_OVERFLOW,                // FIFO overflow happened
-    CAN_EVENT_TYPE_CAN_ERROR                // CAN error frame received
+    CAN_EVENT_TYPE_RECEIVED_FRAME = 1,      // Frame received
+    CAN_EVENT_TYPE_OVERFLOW = 2,            // FIFO overflow happened
+    CAN_EVENT_TYPE_CAN_ERROR = 3            // CAN error frame received
 } can_event_type_t;
 
 /// @brief Controller modes
 typedef enum {
-    CAN_MODE_NORMAL,                        // Can send and receive CAN frames
+    CAN_MODE_NORMAL,                        // Can send and receive classic CAN frames
+    CAN_MODE_NORMAL_FD,                     // Can mix CAN 2.0 and CAN FD frames
     CAN_MODE_LISTEN_ONLY,                   // Listen only (don't acknowledge CAN frames)
     CAN_MODE_ACK_ONLY,                      // Listen but do acknowledge CAN frames
     CAN_MODE_OFFLINE                        // Do not listen or transmit
@@ -257,14 +267,21 @@ static uint8_t can_status_get_tec(can_status_t status);
 /// @return 8-bit value of REC (if state is Bus Off then REC is > 255)
 static uint8_t can_status_get_rec(can_status_t status);
 
+// Frame-specific flags
+// Must fit in 8 bits
+#define CAN_FRAME_FLAG_RTR        (1U << 0)
+#define CAN_FRAME_FLAG_FDF        (1U << 1)
+#define CAN_FRAME_FLAG_ESI        (1U << 2)
+#define CAN_FRAME_FLAG_BRS        (1U << 3)
+
 /// @brief Structure holding the details of a CAN frame
 typedef struct  {
-    can_uref_t uref;    // User-defined data for callbacks to use
-    can_id_t canid;     // CAN ID
-    uint32_t data[2];   // Payload stored as two words (but in memory treated as bytes)
-    uint8_t dlc;        // DLC (0-15)
-    uint8_t id_filter;  // Filter hit: index of ID filter that accepted the frame (received only)
-    bool remote;        // Frame is remote
+    can_uref_t uref;        // User-defined data for callbacks to use
+    can_id_t canid;         // CAN ID
+    uint32_t fd_data[16];   // Payload data up to 64 bytes
+    uint8_t dlc;            // DLC (0-15)
+    uint8_t id_filter;      // Filter hit: index of ID filter that accepted the frame (received only)
+    uint8_t flags;          // Frame-specific flags
 } can_frame_t;
 
 /// @brief stores the details of an overflow in the receive FIFO
@@ -309,9 +326,10 @@ typedef struct {
         uint8_t tail_idx;                               // Index into first free frame at the back of the FIFO
         uint8_t free;                                   // Number of free slots in the queue
         uint8_t dropped_event_idx;                      // Used when the FIFO has overrun
-    } rx_fifo;       
-
+    } rx_fifo;
+    
     // Frame transmit FIFO (feeds into priority queue)
+    // TODO Have driver-specific transmit queue sizes, since the drivers must store the frames either in RAM or in the controlleSr
     struct {
         can_frame_t frames[CAN_TX_FIFO_SIZE];           // Queued frames in transmit FIFO
         uint8_t head_idx;                               // Index into first used frame in the FIFO
@@ -325,10 +343,11 @@ typedef struct {
     // the index. That index is used later on transmission to take it out and create a transmit event,
     // and also a callback to a user handler to deal with the transmission of the frame.
     struct {
-        can_uref_t uref[CAN_TX_QUEUE_SIZE];             // User reference of frame in transmit priority queue
-        bool uref_valid[CAN_TX_QUEUE_SIZE];             // Slot is used (for error tolerance)
-        uint32_t num_free_slots;                        // Number of free slots in the queue
-        uint8_t fifo_slot;                              // If fifo_slot is < MCP25xxFD_TX_QUEUE_SIZE true then indicates where the FIFO frame is
+        can_uref_t uref[UREF_HASH_TABLE_SIZE];      // User reference of frame in transmit priority queue, indexed by hash value
+        bool uref_valid[UREF_HASH_TABLE_SIZE];      // Reference is value (used for error tolerance)
+        uint32_t num_free_slots;                        // Number of free slots in the priority queue
+        uint8_t fifo_hash;                              // If fifo_hash_valid true then indicates the hash value for the front of the software FIFO queue
+        bool fifo_hash_valid;                           
     } tx_pri_queue;
 
     // Transmit event FIFO that records the timestamp and the user reference of the transmitted frame
@@ -396,6 +415,9 @@ void can_status_request_recover(can_controller_t *controller);
 //////////////////////////////////////////// CAN frame /////////////////////////////////////////////
 /// @brief Put the CAN frame into the queue (priority or FIFO)
 /// @param fifo If true, puts the frame into the FIFO queue that feeds into the priority queue
+/// @exception CAN_ERC_BAD_INIT if the controller is not initialized
+/// @exception CAN_ERC_NO_PAYLOAD if the CAN FD frame has no payload
+/// @exception CAN_ERC_NO_ROOM is there is no room in the transmit queue
 can_errorcode_t can_send_frame(can_controller_t *controller, const can_frame_t *frame, bool fifo);
 
 /// @brief Returns true if there is space to send a number of frames
@@ -412,7 +434,7 @@ INLINE bool can_frame_is_extended(const can_frame_t *frame)
 /// @brief Returns true if the frame is a CAN remote frame
 INLINE bool can_frame_is_remote(const can_frame_t *frame)
 {
-    return frame->remote;
+    return !!(frame->flags & CAN_FRAME_FLAG_RTR);
 }
 
 /// @brief Returns the arbitration ID of the frame
@@ -424,19 +446,7 @@ INLINE uint32_t can_frame_get_arbitration_id(const can_frame_t *frame)
 /// @brief Returns a pointer to the payload of the frame
 INLINE uint8_t *can_frame_get_data(const can_frame_t *frame)
 {
-    return (uint8_t *)frame->data;
-}
-
-/// @brief Returns the number of bytes in the payload
-INLINE size_t can_frame_get_data_len(const can_frame_t *frame)
-{
-    uint8_t len = (frame->dlc & 0x8U) ? 8U : frame->dlc;
-    if (can_frame_is_remote(frame)) {
-        return 0;
-    }
-    else {
-        return len;
-    }
+    return (uint8_t*)frame->fd_data;
 }
 
 /// @brief Returns the 4-bit DLC field of the CAN frame
@@ -451,12 +461,6 @@ INLINE uint8_t can_frame_get_id_filter(const can_frame_t *frame)
     return frame->id_filter;
 }
 
-/// @brief Get a pointer to a block of words that contains the payload
-INLINE uint32_t *can_frame_get_data_words(can_frame_t *frame)
-{
-    return frame->data;
-}
-
 /// @brief Get the user reference for a CAN frame
 /// @param frame A pointer to a CAN frame
 INLINE can_uref_t can_frame_get_uref(can_frame_t *frame)
@@ -464,14 +468,49 @@ INLINE can_uref_t can_frame_get_uref(can_frame_t *frame)
     return frame->uref;
 }
 
+/// @brief Returns true if the frame is a CAN FD frame
+INLINE bool can_frame_is_fd(const can_frame_t *frame)
+{
+    return !!(frame->flags & CAN_FRAME_FLAG_FDF);
+}
+
+/// @brief Returns true if the frame is a BRS frame
+INLINE bool can_frame_is_brs(const can_frame_t *frame)
+{
+    return !!(frame->flags & CAN_FRAME_FLAG_BRS);
+}
+
+/// @brief Returns true if the frame has ESI set
+INLINE bool can_frame_is_esi(const can_frame_t *frame)
+{
+    return !!(frame->flags & CAN_FRAME_FLAG_ESI);
+}
+
+extern size_t can_fd_dlc_to_size[];
+
+/// @brief Returns length of frame payload in bytes
+INLINE size_t can_frame_get_data_len(const can_frame_t *frame)
+{
+    if (can_frame_is_remote(frame)) {
+        return 0;
+    }
+    if (can_frame_is_fd(frame)) {
+        size_t len = can_fd_dlc_to_size[frame->dlc & 0xfU];
+        return len;
+    }
+    else {
+        return frame->dlc & (1U << 3) ? 8U : frame->dlc;
+    }
+}
+
 /// @brief Create a CAN frame
 /// @param frame A pointer to the application-allocated structure
-/// @param ide True if the arbitration ID is 29-bit
 /// @param arbitration_id The 29-bit or 11-bit CAN ID
+/// @param ide True if the arbitration ID is 29-bit
 /// @param dlc The 4-bit DLC value for the frame
 /// @param data A pointer to the bytes containing the payload
-/// @param remote The frame is a remote frame
-INLINE void can_make_frame(can_frame_t *frame, bool ide, uint32_t arbitration_id, uint8_t dlc, const uint8_t *data, bool remote)
+/// @param flags Flags to indicate the type of the frame
+INLINE void can_make_frame(can_frame_t *frame, bool ide, uint32_t arbitration_id, uint8_t dlc, const uint8_t *data, uint8_t flags)
 {
     // Limit the DLC to 4 bits in case the caller has made an error
     dlc &= 0xfU;
@@ -479,42 +518,20 @@ INLINE void can_make_frame(can_frame_t *frame, bool ide, uint32_t arbitration_id
     // Fill out the frame details
     frame->canid = can_make_id(ide, arbitration_id);
     frame->dlc = dlc;
-    frame->remote = remote;
+    frame->flags = flags;
     frame->id_filter = 0;
     frame->uref = can_uref_null;    // User can fill this in later if necessary
     // Copy the correct number of data bytes in
-    uint8_t *dst = (uint8_t *)frame->data;
-    switch(dlc) {
-        // Fallthrough case statement to copy a CAN data from a block of bytes
-        // The source for this may not be word-aligned and memory beyond the specified
-        // number of bytes may not be accessible, so copy exactly the number of bytes.
-        // Because this is inline, the compiler may make a much better job of copying
-        // in cases where a word copy will do.
-        case 15U:
-        case 14U:
-        case 13U:
-        case 12U:
-        case 11U:
-        case 10U:
-        case 9U:
-        case 8U:
-            dst[7] = data[7];
-        case 7U:
-            dst[6] = data[6];
-        case 6U:
-            dst[5] = data[5];
-        case 5U:
-            dst[4] = data[4];
-        case 4U:
-            dst[3] = data[3];
-        case 3U:
-            dst[2] = data[2];
-        case 2U:
-            dst[1] = data[1];
-        case 1U:
-            dst[0] = data[0];
-        default:
-            break;
+    uint8_t *dst = (uint8_t *)frame->fd_data;
+    size_t len;
+    if (flags & CAN_FRAME_FLAG_FDF) {
+        len = can_fd_dlc_to_size[dlc];
+    }
+    else {
+        len = dlc >= 8U ? 8U : dlc;
+    }
+    for (size_t i = 0; i < len; i++) {
+        dst[i] = data[i];
     }
 }
 
@@ -536,14 +553,12 @@ INLINE void can_frame_set_uref(can_frame_t *frame, void *ref)
                                                 (buf)[2] = (uint8_t)(((word) >> 8) & 0xffU),  \
                                                 (buf)[3] = (uint8_t)((word) & 0xffU))
 
-
-
-/// @brief Creates a frame from a block of bytes
+/// @brief Creates a CAN frame from a block of bytes
 /// @param frame Pointer to a frame structure allocated by the application
 /// @param src A pointer to bytes from where the frame will be created
 INLINE void can_make_frame_from_bytes(can_frame_t *frame, const uint8_t *src)
 {
-    bool remote = (src[0] & 0x01U) != 0;
+    const uint8_t flags = src[0];
     uint8_t dlc = src[1] & 0x0fU;
     uint32_t tag = CAN_READ_BIG_ENDIAN_WORD(src + 3U);
     uint32_t can_id_word = CAN_READ_BIG_ENDIAN_WORD(src + 7U);
@@ -551,14 +566,16 @@ INLINE void can_make_frame_from_bytes(can_frame_t *frame, const uint8_t *src)
     uint32_t arbitration_id = ide ? (can_id_word & 0x1fffffffU) : (can_id_word & 0x7ffU);
     const uint8_t *data = &src[11];
 
-    can_make_frame(frame, ide, arbitration_id, dlc, data, remote);
+    can_make_frame(frame, ide, arbitration_id, dlc, data, flags);
     // The reference in the frame is the 32-bit tag stored in the frame
     can_frame_set_uref(frame, (void *)tag); 
 }
 
+// Convert a CAN frame to a block of bytes; bytes must be big enough to
+// hold the payload.
 INLINE void can_make_bytes_from_frame(uint8_t *dest, const can_frame_t *frame, uint32_t tag)
 {
-    dest[0] = frame->remote ? 0x1U : 0;
+    dest[0] = frame->flags;
     dest[1] = frame->dlc;
     uint32_t can_id_word = can_frame_get_arbitration_id(frame);
     if (can_frame_is_extended(frame)) {
@@ -569,15 +586,16 @@ INLINE void can_make_bytes_from_frame(uint8_t *dest, const can_frame_t *frame, u
     CAN_WRITE_BIG_ENDIAN_WORD(dest + 7U, can_id_word);
 
     uint8_t *data = can_frame_get_data(frame);
-    // Copy the block of data over (unused bytes are copied too)
-    dest[11] = data[0];
-    dest[12] = data[1];
-    dest[13] = data[2];
-    dest[14] = data[3];
-    dest[15] = data[4];
-    dest[16] = data[5];
-    dest[17] = data[6];
-    dest[18] = data[7];
+    size_t len;
+    if (frame->flags & CAN_FRAME_FLAG_FDF) {
+        len = can_fd_dlc_to_size[frame->dlc];
+    }
+    else {
+        len = frame->dlc >= 8U ? 8U : frame->dlc;
+    }
+    for (size_t i = 0; i < len; i++) {
+        dest[11U + i] = data[i];
+    }
 }
 
 /////////////////////////////////////// CAN receive overflow ///////////////////////////////////////
@@ -607,12 +625,17 @@ uint32_t can_recv_pending(can_controller_t *controller);
 /// @param n_bytes Size of area to write the bytes
 /// @returns number of bytes in the block
 /// @exception If the block isn't big enough then will return 0 even if there are pending events
-uint32_t can_recv_as_bytes(can_controller_t *controller, uint8_t *dest, size_t n_bytes);
+size_t can_recv_as_bytes(can_controller_t *controller, uint8_t *dest, size_t n_bytes);
 
 /// @brief Receive an event
 /// @param event The application-allocated place to write an event to
 /// @returns true if an event was received
 bool can_recv(can_controller_t *controller, can_rx_event_t *event);
+
+/// @brief Peeks at the event at the front of the receive FIFO
+/// @param event The application-allocated place to write an event to
+/// @returns size of CAN frame payload in bytes (if an event is a CAN frame received event)
+size_t can_recv_peek(can_controller_t *controller, can_rx_event_t *event);
 
 /// @brief Get the event timestamp
 /// @param event The event returned by can_recv()

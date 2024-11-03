@@ -15,6 +15,7 @@
 #
 # Building this example requires that the Raspberry Pi Pico C SDK is installed and
 # the environment variable PICO_SDK_PATH is set to point to where it is installed.
+#
 # The Pico C SDK can be cloned from:
 #
 # https://github.com/raspberrypi/pico-sdk
@@ -39,7 +40,7 @@ cmake_minimum_required(VERSION 3.12)
 set(PICO_BOARD pico)
 
 # Include build functions from Pico SDK
-include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+include($ENV{PICO_SDK_PATH}/pico_sdk_init.cmake)
 
 # Set name of project (as PROJECT_NAME) and C/C++ standards
 project(hello_can C CXX ASM)

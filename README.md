@@ -62,6 +62,11 @@ This CAN SDK for C is used by the Canis Labs MicroPython firmware build for the 
 - Added support for multiple instances of a CAN controller (including binding to SPI interface)
 - Renamed files with 'mcp2517fd' to 'mcp25xxfd' to better reflect devices supported
 - Added support for Pico W in example program
+
+## Changes in 2024-11-03 update
+
+- Added support for CAN FD frames; this should be regarded as alpha state (it has been seen to send FD and receive FD frames, though)
+
 ## Future
 
 Roadmap includes:
@@ -70,4 +75,6 @@ Roadmap includes:
 - Sleep and wakeup support
 - Better FIFO design
 - Support for the Bullseye (bullseye.com) CCover code coverage tool
-- Support for CAN FD on the MCP25xxFD controllers
+- A 'signal' API to extract fields of a CAN frame (within ID or payload) to allow
+  fast decoding of a CAN frame
+
