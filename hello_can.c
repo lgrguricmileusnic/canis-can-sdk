@@ -40,6 +40,7 @@
  * on what other serial devices are connected)
  */
 
+// ReSharper disable CppDFAEndlessLoop
 #include <stdio.h>
 #include "pico/stdlib.h"
 
@@ -69,6 +70,13 @@ static can_controller_t controller;
 #include <stdio.h>
 #include "pico/stdlib.h"
 
+#define LEN64_DLC 15
+
+#ifdef ALT_ID
+#define ARB_ID    0x234
+#else
+#define ARB_ID    0x123
+#endif
 // Wrapper to parameterize the API's IRQ handler with the handle to the single CAN
 // controller on the CANPico (the structure is defined above and configured by
 // binding to the SPI port and pins used on the CANPico).
@@ -140,14 +148,14 @@ int main() {
     can_errorcode_t rc;
 
     // Example uses 500Kbit/sec, 75% sample point
-    can_bitrate_t bitrate = {.profile = CAN_BITRATE_500K_75}; 
+    can_bitrate_t bitrate = {.profile = CAN_BITRATE_FD_500K_2M};
 
     // Bind the Pico SPI interface to the CANPico's pin layout
     mcp25xxfd_spi_bind_canpico(&controller.host_interface);
 
     // Set up the CAN controller on the CANPico using the bound SPI interface
     while (true) {
-        rc = can_setup_controller(&controller, &bitrate, CAN_NO_FILTERS, CAN_MODE_NORMAL, CAN_OPTIONS_NONE);
+        rc = can_setup_controller(&controller, &bitrate, CAN_NO_FILTERS, CAN_MODE_NORMAL_FD, CAN_OPTIONS_NONE);
         if (rc != CAN_ERC_NO_ERROR) {
             // This can fail if the CAN transceiver isn't powered up properly. That might happen
             // if the board had 3.3V but not 5V (the transceiver needs 5V to operate). 
@@ -160,12 +168,23 @@ int main() {
         }
     }
 
-    // Create a CAN frame with 11-bit ID of 0x123 and 5 byte payload of deadbeef00
-    uint8_t data[5] = {0xdeU, 0xadU, 0xbeU, 0xefU, 0x00U};
+    uint8_t data[64] = {0xdeU, 0xadU, 0xbeU, 0xefU, 0x00U, 0xdeU, 0xadU, 0xbeU, 0xefU, 0x00U,
+                        0xdeU, 0xadU, 0xbeU, 0xefU, 0x00U, 0xdeU, 0xadU, 0xbeU, 0xefU, 0x00U,
+                        0xdeU, 0xadU, 0xbeU, 0xefU, 0x00U, 0xdeU, 0xadU, 0xbeU, 0xefU, 0x00U,
+                        0xdeU, 0xadU, 0xbeU, 0xefU, 0x00U, 0xdeU, 0xadU, 0xbeU, 0xefU, 0x00U,
+                        0xdeU, 0xadU, 0xbeU, 0xefU, 0x00U, 0xdeU, 0xadU, 0xbeU, 0xefU, 0x00U,
+                        0xdeU, 0xadU, 0xbeU, 0xefU, 0x00U, 0xdeU, 0xadU, 0xbeU, 0xefU, 0x00U,
+                        0xdeU, 0xadU, 0xbeU, 0xefU};
+    sleep_ms(10000);
 
+    printf("data: ");
+    for (uint32_t i = 0; i < 64; i++) {
+        printf("%02x", data[i]);
+    }
+    printf("\n");
     can_frame_t my_tx_frame;
-    can_make_frame(&my_tx_frame, false, 0x123, sizeof(data), data, false);
-
+    can_make_frame(&my_tx_frame, false, ARB_ID, LEN64_DLC, data, CAN_FRAME_FLAG_FDF);
+    print_frame(&my_tx_frame, 0);
     uint32_t queued_ok = 0;
 
     while (true) {
